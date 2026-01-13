@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thoughts</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <style>
+        body { background: black; color: white; margin: 0; height: 100vh; overflow: hidden; 
+               display: flex; justify-content: center; align-items: center; 
+               font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; cursor: pointer; }
+        #container { width: 85%; max-width: 600px; position: relative; height: 300px; }
+        .msg { position: absolute; width: 100%; opacity: 0; transition: opacity 1.2s ease-in-out; 
+               font-size: 1.3rem; line-height: 1.5; top: 50%; transform: translateY(-50%); }
+        .left { text-align: left; color: #aaa; padding-right: 15%; }
+        .right { text-align: right; color: #fff; padding-left: 15%; }
+        .active { opacity: 1; }
+        #hint, #rewind, #fav-controls { position: fixed; bottom: 30px; font-size: 0.9rem; transition: opacity 0.5s; z-index: 100; }
+        #hint { color: #444; pointer-events: none; left: 50%; transform: translateX(-50%); letter-spacing: 1px; }
+        #rewind { left: 30px; color: #888; border: 1px solid #333; padding: 8px 15px; border-radius: 20px; 
+                display: none; cursor: pointer; background: rgba(255,255,255,0.05); text-transform: lowercase; }
+        #fav-controls { right: 30px; display: flex; gap: 10px; opacity: 0; pointer-events: none; }
+        .btn { color: #888; border: 1px solid #333; padding: 8px 15px; border-radius: 20px; 
+               cursor: pointer; background: rgba(255,255,255,0.05); text-transform: lowercase; }
+        .btn:hover { color: #fff; border-color: #666; background: rgba(255,255,255,0.1); }
+        #fav-list { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); 
+                    display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 1000; overflow-y: auto; }
+        .fav-item { padding: 15px; border-bottom: 1px solid #222; width: 80%; max-width: 500px; display: flex; justify-content: space-between; align-items: center; }
+        .fav-text { color: #ccc; font-size: 0.9rem; cursor: pointer; flex-grow: 1; }
+        .remove-fav { color: #ff4444; margin-left: 20px; font-size: 0.8rem; cursor: pointer; }
+        #close-fav { position: absolute; top: 30px; right: 30px; font-size: 1.5rem; cursor: pointer; }
+        @keyframes pulse { 0% { opacity: 0.2; } 50% { opacity: 0.5; } 100% { opacity: 0.2; } }
+        .loading { animation: pulse 1.5s infinite; }
+    </style>
+</head>
+<body onclick="play()">
+
+    <div id="container"></div>
+    <div id="hint" class="loading">awaiting unlock...</div>
+    <div id="rewind" onclick="rewind(event)">↺ rewind</div>
+    
+    <div id="fav-controls">
+        <div class="btn" onclick="toggleFavorite(event)">★ fav</div>
+        <div class="btn" onclick="openFavList(event)">view favs</div>
+    </div>
+
+    <div id="fav-list">
+        <div id="close-fav" onclick="closeFavList(event)">×</div>
+        <h2 style="font-weight: 200; color: #555;">Favorites</h2>
+        <div id="fav-items-container"></div>
+    </div>
+
+    <script>
+        const fileURL = 'https://raw.githubusercontent.com/KeversComputer/chat-archive/refs/heads/main/chat.txt?t=' + new Date().getTime();
+
+        let allSequences = [];
+        let lastPlayedIndex = null;
+        let isRunning = false;
+        let isLoaded = false;
+        let favorites = JSON.parse(localStorage.getItem('chatFavs')) || [];
+
+        async function loadAndDecrypt() {
+            const hint = document.getElementById('hint');
+            let password = localStorage.getItem('vault_key');
+            if (!password) password = prompt("Please enter the password:");
+            if (!password) { hint.innerText = "password required."; return; }
+
+            try {
+                const response = await fetch(fileURL);
+                if (!response.ok) throw new Error("File not found");
+                let encryptedData = await response.text();
+                encryptedData = encryptedData.trim();
+
+                // Logic for "Raw" Base64 strings (Non-Salted)
+                const key = CryptoJS.enc.Utf8.parse(password.trim().padEnd(16, '0').substring(0, 16));
+                const decrypted = CryptoJS.AES.decrypt(encryptedData, key, {
+                    mode: CryptoJS.mode.CBC,
+                    padding: CryptoJS.pad.Pkcs7, // PKCS5 and PKCS7 are effectively the same in CryptoJS
+                    iv: CryptoJS.enc.Utf8.parse('0000000000000000') // Assumes no IV was used
+                });
+
+                const rawChat = decrypted.toString(CryptoJS.enc.Utf8);
+
+                if (!rawChat || rawChat.length < 5) {
+                    localStorage.removeItem('vault_key');
+                    throw new Error("Invalid");
+                }
+
+                localStorage.setItem('vault_key', password.trim());
+                parseChat(rawChat);
+                isLoaded = true;
+                hint.classList.remove('loading');
+                hint.innerText = "unlocked. click anywhere.";
+            } catch (e) {
+                hint.innerText = "incorrect password or connection error.";
+                localStorage.removeItem('vault_key');
+            }
+        }
+
+        function parseChat(data) {
+            const lines = data.split(/\r?\n/);
+            let currentPool = [];
+            lines.forEach(line => {
+                const match = line.match(/\] (.*?): (.*)/);
+                if (match) {
+                    const name = match[1].toLowerCase();
+                    const text = match[2].trim();
+                    let sender = name.includes('livia') ? 'right' : 'left';
+                    if (text && !text.includes('omitted')) currentPool.push({s: sender, t: text});
+                    if (currentPool.length >= 4) {
+                        allSequences.push([...currentPool]);
+                        currentPool = [];
+                    }
+                }
+            });
+        }
+
+        function play() {
+            if (!isLoaded || isRunning || allSequences.length === 0) return;
+            startSequence(Math.floor(Math.random() * allSequences.length));
+        }
+
+        function rewind(event) {
+            event.stopPropagation();
+            if (isRunning || lastPlayedIndex === null) return;
+            startSequence(lastPlayedIndex);
+        }
+
+        function startSequence(index) {
+            isRunning = true;
+            lastPlayedIndex = index;
+            document.getElementById('hint').style.opacity = '0';
+            document.getElementById('rewind').style.opacity = '0';
+            document.getElementById('fav-controls').style.opacity = '0';
+            document.getElementById('fav-controls').style.pointerEvents = 'none';
+            const container = document.getElementById('container');
+            container.innerHTML = '';
+            display(allSequences[index], 0);
+        }
+
+        function display(seq, i) {
+            const container = document.getElementById('container');
+            if (i >= seq.length) {
+                setTimeout(() => { 
+                    const active = document.querySelector('.active');
+                    if (active) active.classList.remove('active');
+                    setTimeout(() => { 
+                        isRunning = false; 
+                        document.getElementById('hint').style.opacity = '1';
+                        document.getElementById('rewind').style.display = 'block';
+                        document.getElementById('rewind').style.opacity = '1';
+                        document.getElementById('fav-controls').style.opacity = '1';
+                        document.getElementById('fav-controls').style.pointerEvents = 'auto';
+                    }, 1000);
+                }, 2500);
+                return;
+            }
+            const div = document.createElement('div');
+            div.className = `msg ${seq[i].s}`;
+            div.innerText = seq[i].t;
+            const prev = document.querySelector('.active');
+            if (prev) {
+                prev.classList.remove('active');
+                setTimeout(() => { if(prev.parentNode) container.removeChild(prev); }, 1000);
+            }
+            container.appendChild(div);
+            setTimeout(() => div.classList.add('active'), 50);
+            setTimeout(() => display(seq, i + 1), 3200);
+        }
+
+        function toggleFavorite(event) {
+            event.stopPropagation();
+            if (lastPlayedIndex === null) return;
+            if (!favorites.includes(lastPlayedIndex)) {
+                favorites.push(lastPlayedIndex);
+                localStorage.setItem('chatFavs', JSON.stringify(favorites));
+                const btn = event.target;
+                btn.innerText = "★ saved";
+                setTimeout(() => btn.innerText = "★ fav", 2000);
+            }
+        }
+
+        function openFavList(event) {
+            event.stopPropagation();
+            const list = document.getElementById('fav-list');
+            const container = document.getElementById('fav-items-container');
+            container.innerHTML = '';
+            if (favorites.length === 0) container.innerHTML = '<p style="color:#444">no favorites saved yet.</p>';
+            favorites.forEach((favIndex) => {
+                const item = document.createElement('div');
+                item.className = 'fav-item';
+                const firstLine = allSequences[favIndex][0].t.substring(0, 30) + "...";
+                item.innerHTML = `<div class="fav-text" onclick="playSpecific(${favIndex})">Memory: "${firstLine}"</div>
+                                  <div class="remove-fav" onclick="removeFav(event, ${favIndex})">remove</div>`;
+                container.appendChild(item);
+            });
+            list.style.display = 'flex';
+        }
+
+        function removeFav(event, index) {
+            event.stopPropagation();
+            favorites = favorites.filter(f => f !== index);
+            localStorage.setItem('chatFavs', JSON.stringify(favorites));
+            openFavList(event);
+        }
+
+        function playSpecific(index) {
+            document.getElementById('fav-list').style.display = 'none';
+            startSequence(index);
+        }
+
+        function closeFavList(event) {
+            event.stopPropagation();
+            document.getElementById('fav-list').style.display = 'none';
+        }
+
+        loadAndDecrypt();
+    </script>
+</body>
+</html>
